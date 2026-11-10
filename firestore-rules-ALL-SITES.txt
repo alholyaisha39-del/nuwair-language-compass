@@ -1,0 +1,290 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // المسارات القديمة: تُترك كما كانت حتى لا تتعطل المواقع السابقة.
+    // ملاحظة مهمة: هذه الصلاحيات القديمة العامة لا تحمي نتائج الموقع القديم.
+    match /challenge/{docId} { allow read, write: if true; }
+    match /results/{docId} { allow read, write: if true; }
+
+    function isReem() {
+      return request.auth != null && request.auth.token.email == 'rem999222@gmail.com';
+    }
+    match /challenge_reem2/{docId} {
+      allow read: if true;
+      allow write: if isReem();
+    }
+    match /results_reem2/{docId} {
+      allow create: if request.resource.data.teacherId == 'reem2';
+      allow update: if request.resource.data.teacherId == 'reem2'
+                    && resource.data.teacherId == 'reem2';
+      allow read, delete: if isReem();
+    }
+
+    function isMona() {
+      return request.auth != null
+        && request.auth.token.email == 'monaalqarni-99@hotmail.com';
+    }
+    function isMonaStudent() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+    function configPath() {
+      return /databases/$(database)/documents/mona24_config/current;
+    }
+    function cyclePath(id) {
+      return /databases/$(database)/documents/mona24_cycles/$(id);
+    }
+    function enrollPath() {
+      return /databases/$(database)/documents/mona24_enrollments/$(request.auth.uid);
+    }
+    function oldResultPath(w) {
+      return /databases/$(database)/documents/mona24_results/$(request.auth.uid + '_w' + string(w));
+    }
+    function cohortResultPath(id,w) {
+      return /databases/$(database)/documents/mona24_results/$(id + '_' + request.auth.uid + '_w' + string(w));
+    }
+    // التاريخ الأصلي محفوظ لمجموعة الطالبات الأولى ولا يتبدل بعد إعادة التفعيل.
+    function originalWeekOpen(w) {
+      return exists(configPath())
+        && get(configPath()).data.get('pauseBeforeLaunch', false) != true
+        && request.time >= get(configPath()).data.get('launchAt', get(configPath()).data.startAt)
+                          + duration.value((w - 1) * 7, 'd');
+    }
+    function cohortWeekOpen(id,w) {
+      return exists(cyclePath(id))
+        && request.time >= get(cyclePath(id)).data.startAt + duration.value((w - 1) * 7, 'd');
+    }
+    function originalPreviousFinished(w) {
+      return w == 1
+        || (w >= 2 && w <= 10 && exists(oldResultPath(w-1))
+            && get(oldResultPath(w-1)).data.completed == true);
+    }
+    function cohortPreviousFinished(id,w) {
+      return w == 1
+        || (w >= 2 && w <= 10 && exists(cohortResultPath(id,w-1))
+            && get(cohortResultPath(id,w-1)).data.completed == true);
+    }
+    function resultShape() {
+      return isMonaStudent()
+        && request.resource.data.teacherId == 'mona24'
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.week is int
+        && request.resource.data.week >= 1
+        && request.resource.data.week <= 10
+        && request.resource.data.studentName is string
+        && request.resource.data.studentName.size() >= 2
+        && request.resource.data.studentName.size() <= 50
+        && request.resource.data.correct is int
+        && request.resource.data.wrong is int
+        && request.resource.data.answered is int
+        && request.resource.data.correct >= 0
+        && request.resource.data.wrong >= 0
+        && request.resource.data.answered == request.resource.data.correct + request.resource.data.wrong
+        && request.resource.data.answered <= 50
+        && request.resource.data.sectionScores is map
+        && request.resource.data.answers is map
+        && request.resource.data.completed is bool
+        && request.resource.data.completed == (request.resource.data.answered == 50);
+    }
+    function originalResult() {
+      return resultShape()
+        && !request.resource.data.keys().hasAny(['cycleId'])
+        && request.resource.data.keys().hasOnly([
+          'ownerUid','teacherId','studentName','week','correct','wrong','answered',
+          'completed','sectionScores','answers','updatedAt'
+        ])
+        && originalWeekOpen(request.resource.data.week)
+        && originalPreviousFinished(request.resource.data.week);
+    }
+    function cohortResult() {
+      return resultShape()
+        && request.resource.data.cycleId is string
+        && exists(enrollPath())
+        && get(enrollPath()).data.cycleId == request.resource.data.cycleId
+        && request.resource.data.keys().hasOnly([
+          'ownerUid','teacherId','studentName','week','correct','wrong','answered',
+          'completed','sectionScores','answers','updatedAt','cycleId'
+        ])
+        && cohortWeekOpen(request.resource.data.cycleId,request.resource.data.week)
+        && cohortPreviousFinished(request.resource.data.cycleId,request.resource.data.week);
+    }
+    function currentStartTime() {
+      return get(configPath()).data.get('currentCycleId','original') == 'original'
+        ? get(configPath()).data.get('launchAt', get(configPath()).data.startAt)
+        : get(cyclePath(get(configPath()).data.currentCycleId)).data.startAt;
+    }
+
+    match /mona24_config/{docId} {
+      allow get: if true;
+      allow list: if isMona();
+      allow create, delete: if isMona();
+      // بداية الدفعة الأولى لا يجوز تغييرها عند بدء دفعة ثانية.
+      allow update: if isMona() && request.resource.data.startAt == resource.data.startAt;
+    }
+    match /mona24_cycles/{cycleId} {
+      allow get: if isMona()
+        || (isMonaStudent() &&
+          (get(configPath()).data.get('currentCycleId','original') == cycleId
+           || (exists(enrollPath()) && get(enrollPath()).data.cycleId == cycleId)));
+      allow list: if isMona();
+      // بعد 70 يومًا تبدأ دفعة جديدة؛ لا تمس النتائج أو التواريخ السابقة.
+      allow create: if isMona() && exists(configPath())
+        && get(configPath()).data.get('pauseBeforeLaunch', false) != true
+        && request.time >= currentStartTime() + duration.value(70,'d')
+        && request.resource.data.teacherId == 'mona24'
+        && request.resource.data.number == get(configPath()).data.get('cycleCount',1) + 1
+        && request.resource.data.startAt == request.time
+        && request.resource.data.keys().hasOnly([
+          'teacherId','number','startAt','weeks','questionsPerSectionPerWeek','updatedAt'
+        ]);
+      allow update, delete: if false;
+    }
+    match /mona24_enrollments/{ownerId} {
+      allow get: if isMona() || (isMonaStudent() && request.auth.uid == ownerId);
+      allow list: if isMona();
+      allow create: if isMonaStudent()
+        && request.auth.uid == ownerId
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.cycleId is string
+        && request.resource.data.cycleId == get(configPath()).data.get('currentCycleId','original')
+        && exists(cyclePath(request.resource.data.cycleId))
+        && request.resource.data.createdAt == request.time
+        && request.resource.data.keys().hasOnly(['ownerUid','cycleId','createdAt']);
+      allow update: if false;
+      allow delete: if isMona();
+    }
+    match /mona24_results/{resultId} {
+      // لا يمكن للطالبة قراءة نتائج الأخريات؛ تستطيع استعادة نتائجها الشخصية فقط.
+      allow get: if isMona()
+        || (isMonaStudent()
+            && (resultId.matches('^' + request.auth.uid + '_w(10|[1-9])$')
+                || resultId.matches('^cycle_[0-9]+_' + request.auth.uid + '_w(10|[1-9])$')));
+      allow list, delete: if isMona();
+      allow create: if (originalResult()
+          && resultId == request.auth.uid + '_w' + string(request.resource.data.week))
+          || (cohortResult()
+          && resultId == request.resource.data.cycleId + '_' + request.auth.uid
+                         + '_w' + string(request.resource.data.week));
+      allow update: if resource.data.ownerUid == request.auth.uid
+        && resource.data.teacherId == 'mona24'
+        && resource.data.week == request.resource.data.week
+        && ((originalResult()
+                && resultId == request.auth.uid + '_w' + string(request.resource.data.week)
+                && !resource.data.keys().hasAny(['cycleId']))
+          || (cohortResult()
+                && resultId == request.resource.data.cycleId + '_' + request.auth.uid
+                               + '_w' + string(request.resource.data.week)
+                && resource.data.cycleId == request.resource.data.cycleId));
+    }
+
+    // نسخة نوير الدوسري المستقلة — الصف السادس الابتدائي.
+    function isNuwair() {
+      return request.auth != null
+        && request.auth.token.email == 'hmod222hoho@gmail.com';
+    }
+    function isNuwairStudent() {
+      return request.auth != null
+        && request.auth.token.firebase.sign_in_provider == 'anonymous';
+    }
+    function nuwairConfigPath() {
+      return /databases/$(database)/documents/nuwair12_config/current;
+    }
+    function nuwairCyclePath(id) {
+      return /databases/$(database)/documents/nuwair12_cycles/$(id);
+    }
+    function nuwairEnrollPath() {
+      return /databases/$(database)/documents/nuwair12_enrollments/$(request.auth.uid);
+    }
+    function nuwairResultPath(id,w) {
+      return /databases/$(database)/documents/nuwair12_results/$(id + '_' + request.auth.uid + '_w' + string(w));
+    }
+    function validNuwairResult() {
+      return isNuwairStudent()
+        && request.resource.data.teacherId == 'nuwair12'
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.cycleId is string
+        && request.resource.data.week is int
+        && request.resource.data.week >= 1
+        && request.resource.data.week <= 10
+        && request.resource.data.studentName is string
+        && request.resource.data.studentName.size() >= 2
+        && request.resource.data.studentName.size() <= 50
+        && request.resource.data.correct is int
+        && request.resource.data.wrong is int
+        && request.resource.data.answered is int
+        && request.resource.data.correct >= 0
+        && request.resource.data.wrong >= 0
+        && request.resource.data.answered == request.resource.data.correct + request.resource.data.wrong
+        && request.resource.data.answered <= 50
+        && request.resource.data.sectionScores is map
+        && request.resource.data.answers is map
+        && request.resource.data.completed is bool
+        && request.resource.data.completed == (request.resource.data.answered == 50)
+        && exists(nuwairEnrollPath())
+        && get(nuwairEnrollPath()).data.cycleId == request.resource.data.cycleId
+        && exists(nuwairCyclePath(request.resource.data.cycleId))
+        && get(nuwairCyclePath(request.resource.data.cycleId)).data.activeWeek >= request.resource.data.week
+        && (request.resource.data.week == 1
+            || (exists(nuwairResultPath(request.resource.data.cycleId, request.resource.data.week - 1))
+                && get(nuwairResultPath(request.resource.data.cycleId, request.resource.data.week - 1)).data.completed == true))
+        && request.resource.data.keys().hasOnly([
+          'ownerUid','teacherId','studentName','cycleId','week','correct','wrong','answered',
+          'completed','sectionScores','answers','updatedAt'
+        ]);
+    }
+
+    match /nuwair12_config/{docId} {
+      allow get: if true;
+      allow list, create, update, delete: if isNuwair();
+    }
+    match /nuwair12_cycles/{cycleId} {
+      // قراءة حالة التفعيل فقط متاحة للصفحة العامة؛ الكتابة والتعداد للمعلمة وحدها.
+      allow get: if true;
+      allow list, create, update, delete: if isNuwair();
+    }
+    match /nuwair12_enrollments/{ownerId} {
+      allow get: if isNuwair() || (isNuwairStudent() && request.auth.uid == ownerId);
+      allow list, delete: if isNuwair();
+      allow create: if isNuwairStudent()
+        && request.auth.uid == ownerId
+        && request.resource.data.ownerUid == request.auth.uid
+        && request.resource.data.cycleId is string
+        && exists(nuwairConfigPath())
+        && request.resource.data.cycleId == get(nuwairConfigPath()).data.currentCycleId
+        && exists(nuwairCyclePath(request.resource.data.cycleId))
+        && request.resource.data.keys().hasOnly(['ownerUid','cycleId','createdAt']);
+      allow update: if false;
+    }
+    // بنك أسئلة نوير: المعلمة وحدها تعدّل المسودات وتعتمدها؛ الطالبات يقرأن النسخة المعتمدة فقط.
+    match /nuwair12_question_banks/{weekId} {
+      allow get: if isNuwair()
+        || (isNuwairStudent()
+            && resource.data.teacherId == 'nuwair12'
+            && resource.data.status == 'approved'
+            && resource.data.publishedBank is map);
+      allow list: if isNuwair();
+      allow create, update: if isNuwair()
+        && request.resource.data.teacherId == 'nuwair12'
+        && request.resource.data.week is int
+        && request.resource.data.week >= 1
+        && request.resource.data.week <= 10;
+      allow delete: if isNuwair();
+    }
+
+    match /nuwair12_results/{resultId} {
+      allow get: if isNuwair()
+        || (isNuwairStudent()
+            && exists(nuwairEnrollPath())
+            && resultId.matches('^' + get(nuwairEnrollPath()).data.cycleId + '_' + request.auth.uid + '_w(10|[1-9])$'));
+      allow list, delete: if isNuwair();
+      allow create: if validNuwairResult()
+        && resultId == request.resource.data.cycleId + '_' + request.auth.uid + '_w' + string(request.resource.data.week);
+      allow update: if validNuwairResult()
+        && resource.data.ownerUid == request.auth.uid
+        && resource.data.teacherId == 'nuwair12'
+        && resource.data.cycleId == request.resource.data.cycleId
+        && resource.data.week == request.resource.data.week
+        && resultId == request.resource.data.cycleId + '_' + request.auth.uid + '_w' + string(request.resource.data.week);
+    }
+  }
+}

@@ -1,0 +1,16 @@
+/*
+  X-Frame-Options: DENY
+  X-Content-Type-Options: nosniff
+  Referrer-Policy: strict-origin-when-cross-origin
+/index.html
+  Cache-Control: no-cache, no-store, must-revalidate
+/teacher/*
+  Cache-Control: no-cache, no-store, must-revalidate
+/assets/student.js
+  Cache-Control: no-cache, no-store, must-revalidate
+/assets/teacher.js
+  Cache-Control: no-cache, no-store, must-revalidate
+/assets/firebase.js
+  Cache-Control: no-cache, no-store, must-revalidate
+/assets/week1.json
+  Cache-Control: no-cache, no-store, must-revalidate
